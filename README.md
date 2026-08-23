@@ -61,8 +61,8 @@ xdelta3 -d -s "Sakura Taisen 1 and 2.iso" "Sakura.Taisen.1.and.2.KR.xdelta" "Sak
 | 항목 | 값 |
 |---|---|
 | 크기 | 1,756,037,120 바이트 (원본과 같음) |
-| MD5 | `F9999AD222B6E4FBFF1E6B4167C436FF` |
-| SHA1 | `47F25ABF5E27312B12898DBD5D1A97F0228E0818` |
+| MD5 | `50D67D2447EE19166E9888983A17E226` |
+| SHA1 | `EDE2C0A391AD091AFD1F83ACAE4ECB806D394491` |
 
 이 값이 나오면 정상입니다.
 
@@ -258,6 +258,17 @@ python tools/check_translation.py
 한도를 넘기면 게임이 스스로 접어서 줄이 하나 밀리고, **마지막 줄이 화면
 밖으로 나갑니다.** `tools/fit_lines.py` 가 맞춰 줍니다.
 
+**줄 수도 원문을 넘으면 안 됩니다.** 글자 수만 보면 부족합니다 —
+사쿠라1 대사창은 원문이 4줄인 것도 있어서 「3줄 이하」 규칙으로는 못 잡습니다.
+번역문 줄이 원문보다 늘면 마지막 줄이 밀려 나갑니다.
+
+```bash
+python tools/fit_lines.py --check
+```
+
+이 검사는 **원문보다 줄이 많은 행**과 **글자 수를 넘는 행**을 함께 봅니다.
+빌드 전에 반드시 돌리세요.
+
 **한도를 재는 가장 믿을 만한 방법은 원문을 세어 보는 것입니다.**
 일본어 대본이 그 창 너비에 맞춰 쓰여 있기 때문입니다.
 
@@ -299,6 +310,33 @@ python tools/fix_chars.py && python tools/glossary.py && python tools/check_tran
 두 게임 모두 **반각 ASCII 글리프가 없습니다.** 사쿠라1 의 FIDX 는
 `sjis - 0x8000` 으로 색인하고, 사쿠라2 의 `drawChar` 는 `0x8140~0xEAA4`
 범위만 받습니다. 글자 폭은 고정이라 한 글자가 한 칸입니다.
+
+### tbl.bin 의 립싱크 블록 — 절대 옮기면 안 되는 것
+
+사쿠라1 본편(`ADVMACRO.PFS`)의 `*tbl.bin` 은 이렇게 생겼습니다.
+
+```
++0x00  u16  엔트리 수 x 2
++0x02  u16  **립싱크 블록 시작 (워드 단위)**   <- 이게 핵심
++0x04       엔트리표  [u16 id][u16 텍스트 워드 오프셋] x n
+            텍스트 blob
+            립싱크 블록 — NUL 로 끊긴 문자열, 메시지당 정확히 2개
+```
+
+헤더의 두 번째 u16 에 2를 곱하면 립싱크 블록의 시작 위치입니다.
+58개 멤버 전부에서 확인했습니다. 즉 **립싱크 블록은 파일 안의 절대 위치**로
+읽힙니다. 텍스트를 다시 채울 때 이 블록을 원래 자리에 그대로 두지 않으면
+입 모양이 깨지고 장면 전환에서 멈춥니다.
+
+`tools/reinsert.py` 의 `build_tbl` 이 헤더의 값을 그대로 두고 블록을 같은
+절대 위치에 못박습니다. 확인하려면:
+
+```bash
+python -c "import sys,struct;sys.path.insert(0,'tools');import reinsert as R;from build_iso import walk_iso,SRC_ISO,SECTOR;f=open(SRC_ISO,'rb');t=walk_iso(f);p=[x for x in t if x.upper().endswith('/ADVMACRO.PFS')][0];_,l,s=t[p];f.seek(l*SECTOR);d=f.read(s);print(sum(1 for n,o,z in R.pfs_entries(d) if 'tbl' in n))"
+```
+
+립싱크 문자열은 `.ea.aeeennnnnn` 처럼 모음 글자로 되어 있습니다 (입 모양).
+메시지당 2개인데, 대사가 붙은 것은 전체의 32%뿐입니다.
 
 ### 텍스트 컨테이너
 

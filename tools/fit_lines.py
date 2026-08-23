@@ -26,8 +26,12 @@
 
 일본어 대본 자체가 그 폭에 맞춰 쓰여 있다. 창 너비를 재는 것보다 이게 낫다.
 
-띄어쓰기에서 다시 접기만 한다. 그래도 3줄에 안 들어가면 손으로 줄여야
-하므로 목록을 찍어 준다.
+**줄 수는 원문을 넘으면 안 된다.** 사쿠라1 대사창은 원문이 4줄인 것도 있어서
+「3줄 이하」만 보면 부족하다. 원문보다 줄이 늘면 화면 밖으로 밀린다.
+이 규칙을 안 보고 18자 재조정을 하다가 140행이 원문보다 길어졌다.
+
+띄어쓰기에서 다시 접기만 한다. 그래도 안 들어가면 손으로 줄여야 하므로
+목록을 찍어 준다.
 """
 import os, re, sys, io
 
@@ -64,6 +68,23 @@ def wrap(text, lim):
     if cur: out.append(cur)
     return out
 
+def check():
+    """원문 줄 수·글자 수를 넘는 행이 있는지 본다. 있으면 0 이 아닌 수를 준다."""
+    bad = 0
+    for fn, lim in LIMITS.items():
+        p = os.path.join(TEXT, fn)
+        if not os.path.exists(p): continue
+        cols, rows = tsvio.read(p)
+        over = long = 0
+        for r in rows:
+            ja = r.get('ja') or ''; ko = r.get('ko') or ''
+            if not ja or not ko: continue
+            if ko.count(NL) > ja.count(NL): over += 1
+            if any(width(l) > lim for l in ko.split(NL)): long += 1
+        print(f"  {fn:<18} {lim}자  원문보다 줄 많음 {over:>4}   글자 초과 {long:>4}")
+        bad += over + long
+    return bad
+
 def run(dry=False):
     for fn, lim in LIMITS.items():
         p = os.path.join(TEXT, fn)
@@ -89,4 +110,6 @@ def run(dry=False):
 
 if __name__ == '__main__':
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+    if '--check' in sys.argv:
+        sys.exit(1 if check() else 0)
     run('--dry' in sys.argv)
