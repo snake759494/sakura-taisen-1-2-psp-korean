@@ -47,7 +47,14 @@ def load_text():
 
 # ---------------------------------------------------------------- 사쿠라 1
 def build_tbl(orig, keyfmt, texts):
-    """tbl.bin 재구축. 같은 문장은 한 번만 저장해 공간을 아낀다.
+    """tbl.bin 재구축. **문장마다 자기 자리를 준다 — 합치지 않는다.**
+
+    처음에는 같은 문장을 한 번만 저장해 공간을 아꼈다. 그런데 원본을 세어 보니
+    메시지 31,481개에 고유 텍스트 오프셋이 31,423개다. 즉 **원본은 문장이 같아도
+    합치지 않는다**(겹치는 것 58개뿐). 한국어는 짧은 문장이 자주 겹쳐서 합치기를
+    하면 3,858개가 남의 자리를 가리킨다. 엔진이 텍스트 오프셋으로 무언가를
+    찾는다면 그대로 사고가 된다. 합치기를 빼도 58개 멤버 전부 원본 텍스트 구역
+    안에 들어가므로(1,465,014B) 원본과 같은 1:1 배치로 되돌린다.
 
     **텍스트 뒤에 딸린 자료를 반드시 원래 자리에 그대로 둬야 한다.**
     처음에는 헤더+표+텍스트만 새로 쓰고 나머지를 버렸는데, 그 뒤에
@@ -71,17 +78,12 @@ def build_tbl(orig, keyfmt, texts):
     if tail_at <= 0: tail_at = len(orig)
     tail = orig[tail_at:]
 
-    blob, pos = bytearray(), {}
-    offs = []
+    blob, offs = bytearray(), []
     for k in range(n):
-        t = texts.get(keyfmt(k))
-        if t is None:                       # TSV 에 없던 빈 엔트리
-            offs.append(0 if not blob else offs[0]); continue
-        if t not in pos:
-            if len(blob) % 2: blob += b'\x00'
-            pos[t] = len(blob)
-            blob += s1_encode(t) + b'\x00'
-        offs.append(pos[t])
+        t = texts.get(keyfmt(k))            # TSV 에 없으면 빈 문장
+        if len(blob) % 2: blob += b'\x00'
+        offs.append(len(blob))
+        blob += (s1_encode(t) if t is not None else b'') + b'\x00'
     if len(blob) % 2: blob += b'\x00'
 
     base = 4 + n*4
