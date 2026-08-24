@@ -103,28 +103,32 @@ def build_tbl(orig, keyfmt, texts):
     return bytes(out)
 
 def build_pfs(src_path, member_filter, keyprefix, texts, report):
+    """PFS 안의 텍스트 멤버만 갈아 끼운다. **멤버는 원래 자리에 그대로 둔다.**
+
+    예전에는 컨테이너를 처음부터 다시 쌓았다. 원본에 빈틈이 없는 파일
+    (ADVMACRO/ADVMISC)에서는 결과가 원본과 같아서 눈치채지 못했는데,
+    빈틈이 있는 SLGMAP.PFS 에서는 **멤버 325개가 전부 다른 섹터로 옮겨간다**.
+    머리표를 다시 써 주니 논리적으로는 맞지만, 실기에서는 이런 이동이
+    그대로 검은 화면이 된다. 자리를 안 건드리는 쪽이 맞다.
+
+    원본 바이트열을 바탕에 두고 바뀐 멤버만 제자리에 덮어쓴다.
+    바꿀 것이 없으면 결과는 원본과 바이트까지 같다.
+    """
     d = open(src_path, 'rb').read()
+    out = bytearray(d)
     mem = pfs_entries(d)
-    SECT = 2048
-    new_members = []
-    for name, off, sz in mem:
-        body = d[off:off+sz]
-        if member_filter(name.lower()):
-            stem = os.path.splitext(name)[0]
-            body = build_tbl(body, lambda k, s=stem: f"{keyprefix}:{s}:{k}", texts)
-        new_members.append((name, body))
-    head = 0x10 + len(mem)*24
-    cur = ((head + SECT - 1)//SECT)*SECT
-    out = bytearray(b'PAKFILE\x00' + struct.pack('>II', len(mem), 0))
-    blobs = []
-    for name, body in new_members:
-        out += name.encode('ascii').ljust(16, b'\x00') + struct.pack('>II', cur//SECT, len(body))
-        blobs.append((cur, body))
-        cur += ((len(body) + SECT - 1)//SECT)*SECT
-    out = bytearray(out.ljust(blobs[0][0], b'\x00'))
-    for at, body in blobs:
-        out = out.ljust(at, b'\x00') + bytearray(body)
-    out = out.ljust(cur, b'\x00')
+    offs = sorted(o for _, o, _ in mem)
+    for i, (name, off, sz) in enumerate(mem):
+        if not member_filter(name.lower()): continue
+        stem = os.path.splitext(name)[0]
+        body = build_tbl(d[off:off+sz], lambda k, s=stem: f"{keyprefix}:{s}:{k}", texts)
+        nxt = next((o for o in offs if o > off), len(d))
+        if len(body) > nxt - off:
+            raise EncodeError(f"{name}: {len(body):,}B 가 배정 공간 {nxt-off:,}B 를 넘음")
+        out[off:off+len(body)] = body
+        if len(body) < sz:                    # 짧아졌으면 남은 원본 바이트를 지운다
+            out[off+len(body):off+sz] = b'\x00' * (sz - len(body))
+        struct.pack_into('>I', out, 0x10 + i*24 + 20, len(body))
     report(os.path.basename(src_path), len(d), len(out))
     return bytes(out)
 

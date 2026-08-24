@@ -125,17 +125,13 @@ PPSSPP 또는 CFW 가 올라간 실기에서 그대로 실행하면 됩니다.
   | `TITLE.SPR` / `TL_ROGO0` / `IC0*.SPR` | 다수 | 「サクラ大戦」 로고. 상표라 그대로 뒀습니다 |
   | `COOK`/`HANA`/`MAIGO`/`SHOT`/`SLOT`/`SWIM`/`SOUJI`.SPR | 30 | 미니게임 설명 띠 |
 
-- **사쿠라1 은 원래 대사 음성이 드뭅니다.** 패치 문제가 아닙니다.
-  음성이 붙은 줄이 `VOICE1.AFS`(770) + `VOICE2.AFS`(807) = **1,577줄**,
-  본편 대사 31,481줄의 **5.0%** 입니다. 20줄에 한 줄꼴이라 「거의 안 나온다」고
-  느껴집니다. 사쿠라2 는 11.0%(38,822줄 중 4,289), 이벤트는 12.7% 라
-  2편을 먼저 하면 차이가 크게 느껴집니다.
+- **사쿠라1 음성** — 실기 제보로 원본에서는 나오고 패치본에서는 안 나온다는 것이
+  확인됐습니다. v3.3 에서 아래 「배치」 문제를 고쳤으니 다시 확인이 필요합니다.
 
-  패치본 검증: `tbl.bin` 58개 전부 **텍스트 뒤 구역(립싱크 블록 포함)이
-  원본과 바이트까지 같고**, 멤버 크기·엔트리 id 도 같습니다. 음성을 트는
-  시나리오 스크립트(`0100.bin` 등 58개)는 아예 손대지 않았고,
-  `.AFS`/`.ADX`/`.DRV` 는 한 파일도 바꾸지 않았습니다.
-  확인 명령은 [6. 개발 내역](#6-개발-내역)에 있습니다.
+  참고로 사쿠라1 은 원래도 음성이 드뭅니다. `VOICE1.AFS`(770) + `VOICE2.AFS`(807)
+  = **1,577줄**, 본편 대사 31,481줄의 **5.0%** 입니다. 사쿠라2 는 11.0%
+  (38,822줄 중 4,289), 이벤트는 12.7% 라 2편을 먼저 하면 차이가 크게 느껴집니다.
+  그래도 「전혀 안 나온다」면 그건 별개 문제입니다.
 
 - `SLGTAB.PFS` 는 개발용 애니메이션 표 라벨이라 화면에 안 나옵니다. 그대로 뒀습니다.
 - **ISO 안에는 게임이 절대 읽지 않는 자산이 섞여 있습니다.** 아래 5개는
@@ -222,10 +218,11 @@ python tools/build_iso.py
 원본보다 커지면 안 됩니다.
 
 ```bash
-python tools/check_translation.py
+python tools/check_translation.py && python tools/check_layout.py
 ```
 
-줄 길이·줄 수가 넘치는 행을 검사합니다.
+줄 길이·줄 수가 넘치는 행, 그리고 **바꾼 파일의 배치가 원본과 같은지** 검사합니다.
+배치 검사는 건너뛰지 마세요 — 어긋나면 에뮬레이터에서는 돌아가고 실기에서만 죽습니다.
 
 ---
 
@@ -377,7 +374,7 @@ for n in EA:
     oa,za=EA[n];ob,zb=EB[n];a=A[oa:oa+za];b=B[ob:ob+zb]
     c=struct.unpack_from('>H',a,0)[0]//2;base=4+c*4
     o_=[struct.unpack_from('>HH',a,4+k*4)[1] for k in range(c)]
-    ta=a.find(b' ',base+max(o_)*2)+1
+    ta=a.find(b'\x00',base+max(o_)*2)+1
     if za!=zb or a[ta:]!=b[ta:]: bad+=1
 print('다른 멤버',bad)"
 ```
@@ -403,6 +400,73 @@ for n,o,z in R.pfs_entries(d):
     t+=c;u+=len({struct.unpack_from('>HH',a,4+k*4)[1] for k in range(c)})
 print(t,u)"
 ```
+
+### 실기에서 죽는 이유는 내용이 아니라 **배치**였다
+
+에뮬레이터에서 멀쩡히 돌던 패치가 실기(PSP 본체)에서는 오프닝 컷신 뒤
+검은 화면에서 멈췄습니다. v3.0~v3.2 내내 그랬습니다. 원인은 파일 내용이
+아니라 **파일 안에서 자료가 놓인 자리**였습니다.
+
+**1. .SPR 첫 청크는 0x100 에 있어야 한다**
+
+`spr_write.rebuild` 가 청크를 처음부터 다시 쌓는 바람에 첫 청크가
+0x100 에서 0x30 으로 당겨졌습니다. 그런데 ISO 안의 `.SPR` **416개가
+예외 없이** 첫 청크를 0x100 에 둡니다.
+
+```bash
+python -c "import sys;sys.path.insert(0,'tools');import spr,collections
+from build_iso import walk_iso,SRC_ISO,SECTOR
+f=open(SRC_ISO,'rb');t=walk_iso(f);c=collections.Counter()
+for p in t:
+    if p.upper().endswith('.SPR'):
+        _,l,s=t[p];f.seek(l*SECTOR);d=f.read(min(s,1<<20))
+        ch=spr.chunks(d)
+        if ch: c[hex(ch[0][0])]+=1
+print(dict(c))"
+```
+
+`{'0x100': 416}` 이 나옵니다. 우연이 아니라 규칙입니다. PSP 의 GE(그래픽 칩)는
+텍스처·팔레트 주소 정렬을 타는데, 에뮬레이터는 그냥 넘어가고 실기는 안 넘어갑니다.
+그리고 이 파일 중 하나가 `/SAKURA1/ADV_SIDE.SPR` — **ADV 장면을 열 때 이름으로
+직접 읽는 파일**입니다 (ELF 0x8a94fbc 에서 참조). 여기서 멈추면 대사도 음성도
+시작되지 않습니다.
+
+**2. .PFS 멤버는 원래 섹터에 있어야 한다**
+
+`build_pfs` 가 멤버를 섹터 단위로 다시 깔았습니다. 빈틈이 없는
+`ADVMACRO.PFS`·`ADVMISC.PFS` 는 결과가 원본과 같아서 눈치채지 못했는데,
+빈틈이 있는 `SLGMAP.PFS`(46 MB) 에서는 **멤버 325개가 전부 다른 섹터**로
+옮겨갔습니다.
+
+**고친 방법** — 두 곳 다 *원본 바이트열을 바탕에 두고 바뀐 자리만 덮어쓰게*
+바꿨습니다. 바꿀 것이 없으면 결과가 원본과 바이트까지 같아야 합니다.
+
+```bash
+python tools/spr_write.py     # 안 바꾸고 다시 쓰기 = 원본과 바이트 동일: 415/415
+python tools/check_layout.py  # 배치·구조가 어긋난 파일 0개
+```
+
+`check_layout.py` 는 바꾼 파일 714개를 원본과 대조해 **크기·청크 자리·PFS 멤버
+자리·압축 푼 길이**를 확인합니다. 배치가 어긋나면 0 이 아닌 값으로 끝납니다.
+
+### 사쿠라1 ADV 음성은 어떻게 트나
+
+ELF 를 뜯어 경로를 찾았습니다.
+
+```
+0x8a938d8  jal   0x8a85378        ; 스크립트 변수 0번 읽기 (0x8c310e8 + n*2)
+0x8a938f0  jal   0x8913ea4        ; snprintf
+0x8a938f4  addiu $a2, $a2, -0x782c ; "/sakura1/se/adp%05d.adx"
+0x8a938f8  jal   0x8a82cec        ; 재생
+```
+
+**음성 번호는 시나리오 스크립트가 변수 0번에 넣는 값**입니다. `adp00000~adp00999`
+는 `/voice1.afs`, `adp01000~` 는 `/voice2.afs` 에서 꺼냅니다 (ELF 0x8abd104 의
+{경로, 칸수} 표: voice1=1000, voice2=1000, slgvoice=3000).
+
+즉 음성은 `tbl.bin` 의 텍스트와 아무 상관이 없고, 시나리오 스크립트
+(`0100.bin` 등 58개, **한 바이트도 안 바꿨습니다**)가 정합니다.
+`.AFS`/`.ADX` 도 하나도 안 건드렸습니다.
 
 ### 텍스트 컨테이너
 

@@ -61,7 +61,20 @@ def pack_px(img, bpp):
     raise ValueError(bpp)
 
 def rebuild(d, changes):
-    """changes = {이미지번호: (h,w) 인덱스배열}. 새 .SPR 바이트열을 돌려준다."""
+    """changes = {이미지번호: (h,w) 인덱스배열}. 새 .SPR 바이트열을 돌려준다.
+
+    **원본 배치를 그대로 지킨다.**
+
+    예전에는 청크를 처음부터 다시 쌓았다. 그러면 첫 청크가 0x100 에서
+    0x30 으로 당겨진다. 그런데 이 게임에 든 .SPR 416개가 **예외 없이**
+    첫 청크를 0x100 에 두고, 뒤 청크는 정렬 없이 붙여 쓴다. 지켜야 하는
+    규칙이다 — 에뮬레이터는 넘어가지만 **실기에서는 그림이 안 나오고
+    검은 화면에서 멈춘다** (PSP GE 는 텍스처·팔레트 주소 정렬을 탄다).
+
+    그래서 원본 바이트열을 바탕으로 두고 **바뀐 그림만 제자리에 덮어쓴다**.
+    새로 압축한 것이 원래 자리보다 크면 그것만 데이터 구역 끝에 붙인다.
+    changes 가 비면 결과는 원본과 바이트까지 같다 (아래 자체 검사).
+    """
     ch = spr.chunks(d)
     if not ch: raise ValueError("SPR 이 아니다")
 
@@ -78,39 +91,53 @@ def rebuild(d, changes):
     for i in changes:
         if not (0 <= i < cnt): raise ValueError(f"이미지 번호 {i} 없음 (장수 {cnt})")
 
-    # 새 이미지 청크: 머리 + 엔트리표 + 데이터
-    head = bytearray(body[:0x10])
-    tbl, blob = bytearray(), bytearray()
-    for i, (w, h, fmt, q, eo, es) in enumerate(ents):
-        if i in changes:
-            bpp = spr.BPP[fmt & 0x0F]
-            raw = pack_px(changes[i], bpp)
-            # 원래 압축돼 있던 것은 다시 압축한다. 날것으로 두면 파일이 4~5배로
-            # 불어 ISO 의 배정 공간(섹터 단위)을 넘는다.
-            data = spr_compress.compress(raw) if (fmt >> 4) else raw
-            nfmt = fmt
-        else:
-            data = body[db+eo: db+eo+es]
-            nfmt = fmt
-        while len(blob) % 4: blob += b'\x00'
-        tbl += struct.pack('>4H2I', w, h, nfmt, q, len(blob), len(data))
-        blob += data
-    newbody = bytes(head + tbl + blob)
+    # 원본은 엔트리 데이터를 정렬 없이 빈틈없이 붙여 쓴다(412개 청크에서 확인).
+    # 그러니 자리에 들어가면 제자리에, 안 들어가면 구역을 통째로 다시 쌓는다.
+    enc, spill = {}, False
+    for i in sorted(changes):
+        w, h, fmt, q, eo, es = ents[i]
+        raw = pack_px(changes[i], spr.BPP[fmt & 0x0F])
+        # 원래 압축돼 있던 것은 다시 압축한다. 날것으로 두면 4~5배로 불어난다.
+        enc[i] = spr_compress.compress(raw) if (fmt >> 4) else raw
+        if len(enc[i]) > es: spill = True
 
-    # 컨테이너 다시 쌓기 (청크 차례는 그대로)
-    bodies = [newbody if k == img_i else c[3] for k, c in enumerate(ch)]
-    tbl_len = 0x10 + len(ch)*16
-    cur = (tbl_len + ALIGN - 1)//ALIGN*ALIGN
-    out = bytearray(d[:0x10])
-    places = []
-    for b in bodies:
-        places.append(cur); cur += (len(b) + ALIGN - 1)//ALIGN*ALIGN
-    for (o, s, ix, _), at, b in zip(ch, places, bodies):
-        out += struct.pack('>4I', at, len(b), ix, 0)
-    out = bytearray(out.ljust(places[0], b'\x00'))
-    for at, b in zip(places, bodies):
-        out = bytearray(out.ljust(at, b'\x00')) + bytearray(b)
-    return bytes(out.ljust(cur, b'\x00'))
+    new = list(ents)
+    if not spill:                                # 전부 원래 자리에 들어간다
+        blob = bytearray(body[db:])
+        for i, data in enc.items():
+            w, h, fmt, q, eo, es = ents[i]
+            blob[eo:eo+es] = data + b'\x00'*(es - len(data))
+            new[i] = (w, h, fmt, q, eo, len(data))
+    else:                                        # 구역을 원본처럼 빈틈없이 다시 쌓는다
+        blob = bytearray()
+        for i, (w, h, fmt, q, eo, es) in enumerate(ents):
+            data = enc.get(i, bytes(body[db+eo: db+eo+es]))
+            new[i] = (w, h, fmt, q, len(blob), len(data))
+            blob += data
+        keep = len(body) - db                    # 원본 데이터 구역 길이
+        if len(blob) < keep: blob += bytes(keep - len(blob))   # 청크 크기까지 그대로
+
+    nb = bytearray(body[:db])
+    for i, t in enumerate(new):
+        struct.pack_into('>4H2I', nb, 0x10 + i*0x10, *t)
+    nb += blob
+    bodies = [bytes(nb) if k == img_i else c[3] for k, c in enumerate(ch)]
+
+    # 청크 자리는 원본 그대로. 커져서 다음 청크를 침범할 때만 그 뒤를 민다.
+    places = [c[0] for c in ch]
+    order = sorted(range(len(ch)), key=lambda k: places[k])
+    for a, b2 in zip(order, order[1:]):
+        need = places[a] + len(bodies[a])
+        if places[b2] < need: places[b2] = need
+
+    out = bytearray(d)                           # 원본을 바탕으로
+    for k in range(len(ch)):
+        struct.pack_into('>4I', out, 0x10 + k*16, places[k], len(bodies[k]), ch[k][2], 0)
+    for k in order:
+        at, b2 = places[k], bodies[k]
+        if at + len(b2) > len(out): out += b'\x00' * (at + len(b2) - len(out))
+        out[at:at+len(b2)] = b2
+    return bytes(out)
 
 if __name__ == '__main__':
     sys.stdout.reconfigure(encoding='utf-8', errors='replace')
@@ -135,7 +162,6 @@ if __name__ == '__main__':
         except Exception as e:
             skip += 1; continue
         n += 1
-        a, b2 = pics(d), pics(nd)
-        if len(a) == len(b2) and all(x == y for x, y in zip(a, b2)): ok += 1
-        else: print(f"  다름: {p2}")
-    print(f"무압축 재기록 왕복 검증: {ok}/{n} 일치 (건너뜀 {skip})")
+        if nd == d: ok += 1
+        else: print(f"  다름: {p2}  {len(d)} -> {len(nd)}")
+    print(f"안 바꾸고 다시 쓰기 = 원본과 바이트 동일: {ok}/{n} (건너뜀 {skip})")
