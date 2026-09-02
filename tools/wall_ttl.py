@@ -126,39 +126,22 @@ def run(make_png=False, only=None):
         before = rgb.copy()
         mask = glyph_mask(rgb, jobs)
         edge = edge_color(rgb, mask)
-        # 확산은 넓은 자리에서 밋밋한 얼룩을 만든다 (사진의 디더·줄무늬 질감이
-        # 사라져 회색 헝겊을 댄 것처럼 보였다). 대신 **상자 위쪽을 거울로 복사**해
-        # 질감을 그대로 가져오고, 확산은 거울이 못 닿는 자리의 보험으로만 쓴다.
-        base = inpaint(rgb, mask)
-        rgb2 = base.copy()
-        H, W = rgb.shape[:2]
-        # 상자 띠를 **아래쪽 띠의 핑퐁 타일**로 통째 덮는다.
-        #   - 마스크만 채우면 흐릿한 원문 가장자리가 남는다 (1차 시도)
-        #   - 확산은 넓은 자리에 밋밋한 얼룩을 만든다 (2차 시도)
-        #   - 거울 복사는 원천에 원문이 겹치면 막히고, 막힌 자리가 얼룩진다 (3차)
-        # 아랫줄부터 채우면 원천(바로 아래 띠)이 항상 깨끗하다 — 마지막 줄의
-        # 아래는 원본 그대로고, 그 윗줄의 아래는 방금 채운 띠다.
-        # 첫 줄(제N화)은 위 하늘에서, 나머지는 아래에서 가져온다. 아래 사슬을
-        # 끝까지 쓰면 밑바닥 질감(편지지 따위)이 두 띠를 타고 올라와 엉뚱한
-        # 자리에 나타난다 — 첫 줄만이라도 위에서 끊어 주면 눈에 안 띈다.
-        srt = sorted(jobs, key=lambda j: j[0][1])
-        for (box, ko) in srt[:0:-1] + [srt[0]]:
-            first = (box, ko) == srt[0]
-            x0, y0, x1, y1 = box
-            yt = max(0, y0-12); yb = min(H, y1+8)
-            xl = max(0, x0-4); xr = min(W, x1+4)
-            if first and yt >= 6:                # 첫 줄: 위 띠에서 핑퐁
-                sh = min(24, yt)
-                for y in range(yt, yb):
-                    k = (y-yt) % (2*sh)
-                    ysrc = yt-1 - (k if k < sh else 2*sh-1-k)
-                    rgb2[y, xl:xr] = rgb2[ysrc, xl:xr]
-            else:                                # 나머지: 아래 띠에서 핑퐁
-                sh = min(24, H - yb)
-                for y in range(yt, yb):
-                    k = (yb-1-y) % (2*sh)
-                    ysrc = yb + (k if k < sh else 2*sh-1-k)
-                    rgb2[y, xl:xr] = rgb2[ysrc, xl:xr]
+        # 지우는 방법 — 다섯 번 갈아엎었다.
+        #   1차 마스크만 확산(적은 횟수): 흐릿한 원문 가장자리가 남았다
+        #   2차 넓은 확산: 사진의 디더 질감이 사라져 회색 헝겊 같았다
+        #   3차 거울 복사: 원천에 원문이 겹치면 막히고 그 자리가 얼룩졌다
+        #   4차 띠 전체를 핑퐁 타일로 덮기: **띠 경계가 네모로 드러나고
+        #        가로줄이 생겼다** (이슈 #9)
+        #   5차 핑퐁을 마스크 안에만: 네모는 옅어졌지만, 아래 띠의 밝은
+        #        편지지가 위 어두운 자리로 올라와 여전히 얼룩이 남았다
+        # 이 그림들은 **세로로 색이 크게 변한다**(어두운 실내 -> 밝은 종이).
+        # 다른 줄에서 질감을 떠 오는 방법은 그래서 다 실패한다.
+        # 지금은 **마스크를 넉넉히 부풀려 확산만** 쓴다. 질감은 조금 뭉개지지만
+        # 색이 제자리에 남고 네모·가로줄이 안 생긴다. 어차피 그 위에 한글이
+        # 덮여서 남는 곳은 글자 사이 틈뿐이다.
+        grow = np.asarray(Image.fromarray(mask.astype(np.uint8)*255)
+                          .filter(ImageFilter.MaxFilter(7))) > 0
+        rgb2 = inpaint(rgb, grow, rounds=400)
         rgb = rgb2
         for box, ko in jobs:
             draw_text(rgb, box, ko, edge)

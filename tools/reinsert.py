@@ -46,60 +46,87 @@ def load_text():
     return out, n_ko
 
 # ---------------------------------------------------------------- 사쿠라 1
-def build_tbl(orig, keyfmt, texts):
-    """tbl.bin 재구축. **문장마다 자기 자리를 준다 — 합치지 않는다.**
+def build_tbl(orig, keyfmt, texts, cap=None):
+    """사쿠라1 tbl.bin 재구축.
 
-    처음에는 같은 문장을 한 번만 저장해 공간을 아꼈다. 그런데 원본을 세어 보니
-    메시지 31,481개에 고유 텍스트 오프셋이 31,423개다. 즉 **원본은 문장이 같아도
-    합치지 않는다**(겹치는 것 58개뿐). 한국어는 짧은 문장이 자주 겹쳐서 합치기를
-    하면 3,858개가 남의 자리를 가리킨다. 엔진이 텍스트 오프셋으로 무언가를
-    찾는다면 그대로 사고가 된다. 합치기를 빼도 58개 멤버 전부 원본 텍스트 구역
-    안에 들어가므로(1,465,014B) 원본과 같은 1:1 배치로 되돌린다.
+    구조 (모두 빅엔디안, 오프셋은 **워드** 단위)
 
-    **텍스트 뒤에 딸린 자료를 반드시 원래 자리에 그대로 둬야 한다.**
-    처음에는 헤더+표+텍스트만 새로 쓰고 나머지를 버렸는데, 그 뒤에
-    립싱크 음소 열(`.ea.aeeennnnnn` 같은 a/e/i/o/u/n 문자열)이 들어 있다.
-    이걸 날리면 **사쿠라1 음성이 하나도 안 나오고**, 게임이 그 자리를
-    읽으려다 장면 전환에서 멈춘다. 0100tbl.bin 기준 14,669 바이트다.
+        +0x00  u16  W = 메시지 수 x 2
+        +0x02  u16  U = 립싱크 블록 시작 (워드)
+        +0x04       [u16 id][u16 off] x n
+                    메시지마다  [u16 음성번호][u16 립싱크오프셋][본문 ... 00]
+                                off 는 **본문**을 가리킨다 (앞 4바이트 뒤)
+                    립싱크 블록
 
-    그래서 원본에서 마지막 문장이 끝나는 자리를 찾아 그 뒤를 꼬리로 떼어
-    두고, 새 텍스트는 그 앞까지만 채운 뒤 꼬리를 **같은 절대 위치**에 붙인다.
+    엔진(0x8a7f9e8)이 하는 일 — 역어셈블로 확인:
+
+        본문   = buf + (W + off + 2)*2
+        음성   = BE16(본문 - 4)     0 이면 음성 없음, 0xFFFF 면 0으로
+        립싱크 = buf + (U + BE16(본문 - 2))*2
+
+    **본문 앞 4바이트를 반드시 살려야 한다.** 예전에는 본문만 이어 붙이고
+    off 를 그 앞으로 잡아서, 그 4바이트 자리에 **앞 메시지의 꼬리**가
+    들어갔다. 그래서 사쿠라1 대사 음성이 통째로 안 나왔다
+    (이슈 #5 #8 #9 #10). 0100tbl.bin 을 세어 보면 634개 중 170개가
+    음성 번호를 갖고 있고, 그 수는 1장 립싱크 블록의 비어 있지 않은
+    레코드 수와 정확히 같다.
+
+    **립싱크 블록은 옮겨도 된다.** 자리를 머리표의 U 에서 읽기 때문이다.
+    (예전에는 그걸 몰라서 블록을 원래 절대 위치에 못박고 앞을 0으로 채웠다.)
+    한국어가 길어져 본문 구역이 넘치면 블록을 뒤로 밀고 U 를 고쳐 쓴다.
+
+    같은 문장은 **앞 4바이트까지 같을 때만** 합친다. 음성 번호가 다르면
+    같은 문장이라도 따로 둬야 한다.
     """
-    words = struct.unpack_from('>H', orig, 0)[0]
-    n = words // 2
-    unk = struct.unpack_from('>H', orig, 2)[0]
+    W = struct.unpack_from('>H', orig, 0)[0]
+    n = W // 2
+    U0 = struct.unpack_from('>H', orig, 2)[0]
     ids = [struct.unpack_from('>HH', orig, 4 + k*4)[0] for k in range(n)]
-
-    # 원본 꼬리 잘라내기: 가장 뒤쪽 문장의 NUL 다음부터 파일 끝까지
-    base0 = 4 + n*4
     o_offs = [struct.unpack_from('>HH', orig, 4 + k*4)[1] for k in range(n)]
-    last = base0 + max(o_offs)*2
-    tail_at = orig.find(b'\x00', last) + 1 if last < len(orig) else len(orig)
-    if tail_at <= 0: tail_at = len(orig)
-    tail = orig[tail_at:]
+    base = 4 + n*4
 
-    blob, offs = bytearray(), []
+    # 메시지마다 본문 앞 4바이트(음성 번호, 립싱크 오프셋)를 원본에서 떠 온다.
+    # 0번 메시지는 그 4바이트가 엔트리표 마지막 칸과 겹친다 (원본이 0으로 비워 둔다).
+    pre = []
+    for o in o_offs:
+        p = base + o*2 - 4
+        pre.append(bytes(orig[p:p+4]) if p >= 0 else b'\x00'*4)
+
+    # 립싱크 블록. 뒤에 붙은 NUL 채움은 덜어낸다 (마지막 레코드의 끝 표시는 남긴다).
+    # 58개 멤버를 합치면 48 KB 라, 한국어가 길어진 만큼을 여기서 되찾는다.
+    blk = orig[U0*2:]
+    blk = blk[:min(len(blk), len(blk.rstrip(bytes(1))) + 2)]
+
+    blob, pos, offs = bytearray(), {}, []
     for k in range(n):
-        t = texts.get(keyfmt(k))            # TSV 에 없으면 빈 문장
-        if len(blob) % 2: blob += b'\x00'
-        offs.append(len(blob))
-        blob += (s1_encode(t) if t is not None else b'') + b'\x00'
+        t = texts.get(keyfmt(k))
+        key = (pre[k], t)
+        if key not in pos:
+            if len(blob) % 2: blob += b'\x00'
+            blob += pre[k]
+            pos[key] = len(blob)             # 오프셋은 **본문**을 가리킨다
+            blob += (s1_encode(t) if t is not None else b'') + b'\x00'
+        offs.append(pos[key])
     if len(blob) % 2: blob += b'\x00'
 
-    base = 4 + n*4
     for o in offs:
         if o // 2 > 0xFFFF:
-            raise EncodeError(f"텍스트 블록이 u16 워드 오프셋 한계(128 KiB)를 넘음")
-    out = bytearray(struct.pack('>HH', words, unk))
+            raise EncodeError("본문 구역이 u16 워드 오프셋 한계(128 KiB)를 넘음")
+
+    out = bytearray(struct.pack('>HH', W, 0))
     for i, o in zip(ids, offs):
         out += struct.pack('>HH', i, o // 2)
     assert len(out) == base
     out += blob
-    if tail:
-        if len(out) > tail_at:
-            raise EncodeError(f"번역문이 원본 텍스트 구역({tail_at-base:,}B)을 넘어 "
-                              f"립싱크 자료를 밀어낸다 ({len(out)-base:,}B)")
-        out = bytearray(bytes(out).ljust(tail_at, b'\x00')) + tail
+    if len(out) % 2: out += b'\x00'
+    U = len(out) // 2
+    if U > 0xFFFF:
+        raise EncodeError("립싱크 블록 위치가 u16 워드 한계를 넘음")
+    struct.pack_into('>H', out, 2, U)        # 블록이 옮겨간 자리를 머리표에 적는다
+    out += blk
+
+    if cap is not None and len(out) > cap:
+        raise EncodeError(f"{len(out):,}B 가 배정 공간 {cap:,}B 를 넘음")
     return bytes(out)
 
 def build_pfs(src_path, member_filter, keyprefix, texts, report):
@@ -121,10 +148,9 @@ def build_pfs(src_path, member_filter, keyprefix, texts, report):
     for i, (name, off, sz) in enumerate(mem):
         if not member_filter(name.lower()): continue
         stem = os.path.splitext(name)[0]
-        body = build_tbl(d[off:off+sz], lambda k, s=stem: f"{keyprefix}:{s}:{k}", texts)
         nxt = next((o for o in offs if o > off), len(d))
-        if len(body) > nxt - off:
-            raise EncodeError(f"{name}: {len(body):,}B 가 배정 공간 {nxt-off:,}B 를 넘음")
+        body = build_tbl(d[off:off+sz], lambda k, s=stem: f"{keyprefix}:{s}:{k}",
+                         texts, cap=nxt - off)
         out[off:off+len(body)] = body
         if len(body) < sz:                    # 짧아졌으면 남은 원본 바이트를 지운다
             out[off+len(body):off+sz] = b'\x00' * (sz - len(body))

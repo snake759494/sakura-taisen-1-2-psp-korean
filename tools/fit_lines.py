@@ -68,21 +68,31 @@ def wrap(text, lim):
     if cur: out.append(cur)
     return out
 
+TOKEN = re.compile(r'<[0-9A-Fa-f]{4}>')
+
 def check():
-    """원문 줄 수·글자 수를 넘는 행이 있는지 본다. 있으면 0 이 아닌 수를 준다."""
+    """원문 줄 수·글자 수·제어코드 자리를 어긴 행이 있는지 본다.
+
+    **제어코드가 맨 앞에 있으면 번역문에서도 맨 앞이어야 한다.**
+    `<FFFC><000E>武蔵よ……` 를 `무사시여……<FFFC><000E>` 로 옮겨 놓은 행이
+    하나 있었는데, 그 대사에서 사쿠라2 가 멈췄다 (이슈 #11).
+    """
     bad = 0
     for fn, lim in LIMITS.items():
         p = os.path.join(TEXT, fn)
         if not os.path.exists(p): continue
         cols, rows = tsvio.read(p)
-        over = long = 0
+        over = long = tok = 0
         for r in rows:
             ja = r.get('ja') or ''; ko = r.get('ko') or ''
             if not ja or not ko: continue
             if ko.count(NL) > ja.count(NL): over += 1
             if any(width(l) > lim for l in ko.split(NL)): long += 1
-        print(f"  {fn:<18} {lim}자  원문보다 줄 많음 {over:>4}   글자 초과 {long:>4}")
-        bad += over + long
+            if TOKEN.findall(ja) != TOKEN.findall(ko): tok += 1
+            elif bool(TOKEN.match(ja)) != bool(TOKEN.match(ko)): tok += 1
+        print(f"  {fn:<18} {lim}자  원문보다 줄 많음 {over:>4}   글자 초과 {long:>4}"
+              f"   제어코드 어긋남 {tok:>4}")
+        bad += over + long + tok
     return bad
 
 def run(dry=False):
