@@ -3,6 +3,7 @@
 번역 결과 검증기.
 
   python check_translation.py <번역된.tsv> [원본.tsv]
+  python check_translation.py                 # 인자가 없으면 text/ 의 대사 TSV 전부
 
 원본을 주면 key/ja 열이 변조되지 않았는지도 대조합니다.
 (원본을 생략하면 같은 폴더의 .orig 백업 또는 text/ 원본을 찾습니다)
@@ -127,8 +128,20 @@ def main(trans, orig=None):
         if len(ex[k]) > 8: print(f"    ... 외 {len(ex[k])-8}건")
     return 1
 
+# mg_daif.tsv 는 미니게임 창이라 상한이 달라 여기서 안 본다
+DEFAULT = ['sakura1_adv', 'sakura1_slg', 'sakura2_adv', 'sakura2_evt', 'sakura2_slg']
+
 if __name__ == '__main__':
-    if len(sys.argv) < 2: sys.exit(__doc__)
+    if len(sys.argv) < 2:
+        # 인자가 없으면 text/ 의 대사 TSV 전부를 차례로 본다 (README 의 빌드 순서용)
+        root = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'text')
+        rc = 0
+        for n in DEFAULT:
+            p = os.path.join(root, n + '.tsv')
+            if not os.path.exists(p): continue
+            rc |= main(p, None)
+            print()
+        sys.exit(rc)
     t = sys.argv[1]
     o = sys.argv[2] if len(sys.argv) > 2 else None
     if o is None:

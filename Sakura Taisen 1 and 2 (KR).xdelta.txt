@@ -4,6 +4,10 @@
 이 xdelta 파일은 원본 ISO 에 덧씌워 한글판 ISO 를 만드는 차분 패치입니다.
 원본 ISO 는 들어 있지 않습니다. 직접 준비하셔야 합니다.
 
+판       v3.4
+저장소   https://github.com/snake759494/sakura-taisen-1-2-psp-korean
+         (최신 판, 적용 방법, 제보는 여기서)
+
 
 적용 대상
 ---------
