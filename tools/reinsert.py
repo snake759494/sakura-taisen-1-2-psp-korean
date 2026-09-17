@@ -179,6 +179,14 @@ def build_sk(raw, stem, texts, report):
     assert len(out) == txt
     out += blob
     struct.pack_into('<I', out, 16, len(out))          # 헤더[4] = 전체 크기
+    # 압축을 푼 크기가 원본의 0x800 올림을 넘으면 안 된다.
+    # SK1007 이 12,262B -> 12,438B 로 0x3000 을 넘었을 때만 10장 「무사시여……」
+    # 장면에서 진행이 멈췄다 (83개 중 이 파일만 경계를 넘었고, 이 파일만 멈췄다).
+    # 게임이 이 크기 단위로 버퍼를 잡는 것으로 보인다.
+    cap = -(-len(dec) // 0x800) * 0x800
+    if len(out) > cap:
+        raise EncodeError(f"{stem}.CMP: 압축 푼 크기 {len(out):,}B 가 원본 {len(dec):,}B 의 "
+                          f"0x800 올림({cap:,}B)을 넘음 — 번역을 {len(out)-cap}B 줄이세요")
     enc = compress(bytes(out))
     report(stem + '.CMP', len(raw), len(enc))
     return enc

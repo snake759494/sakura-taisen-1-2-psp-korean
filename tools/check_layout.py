@@ -88,8 +88,11 @@ def check():
                     if mv: bad.append((iso_path, f"자리가 바뀐 멤버 {len(mv)}개: {mv[:4]}"))
         elif u.endswith('.CMP'):
             try:
-                la, lb = len(decompress(a)), len(decompress(b))
-                if la != lb: bad.append((iso_path, f"압축 푼 길이 {la:,} -> {lb:,}"))
+                la, lb = len(decompress(a)[0]), len(decompress(b)[0])
+                # 사쿠라2 본편 SK####.CMP 는 원본의 0x800 올림까지만 커질 수 있다
+                # (SK1007 이 0x3000 을 넘자 10장에서 진행이 멈췄다). 나머지는 같아야 한다.
+                cap = -(-la // 0x800) * 0x800 if (u.startswith('SK') or u.endswith('LOW.CMP')) else la
+                if lb > cap: bad.append((iso_path, f"압축 푼 길이 {la:,} -> {lb:,} (상한 {cap:,})"))
             except Exception as e:
                 bad.append((iso_path, f"압축 풀기 실패: {e}"))
     f.close()
