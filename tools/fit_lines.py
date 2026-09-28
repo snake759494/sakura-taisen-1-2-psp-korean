@@ -70,6 +70,22 @@ def wrap(text, lim):
 
 TOKEN = re.compile(r'<[0-9A-Fa-f]{4}>')
 
+CHOICE_LIM = 15
+def is_choice(fn, r):
+    """사쿠라1 본편 선택지 — 메시지 id 가 0x4Exx.
+
+    선택지는 **한 줄이 선택지 하나**다. 그래서
+      - 줄 수는 원문과 **같아야** 하고 (합치거나 나누면 선택지가 섞인다),
+      - 한 줄은 **15자** 까지다. 선택지 창은 대사창보다 좁다
+        (원문 최대 15자. 18자를 넣었더니 창 양쪽으로 한 칸씩 삐져나왔다).
+    자동 줄바꿈(run)이 선택지를 한 문장으로 합쳐 다시 접는 바람에
+    「옷을 골라 준다．　옷을 갈아입은 / 아이리스를 상상한다．…」 처럼
+    선택지가 뒤섞인 적이 있다. 그래서 run 은 선택지를 건드리지 않는다.
+    """
+    if fn != 'sakura1_adv.tsv': return False
+    try: return 0x4E <= int(r.get('id') or '0', 16) >> 8 <= 0x4F
+    except ValueError: return False
+
 def check():
     """원문 줄 수·글자 수·제어코드 자리를 어긴 행이 있는지 본다.
 
@@ -86,8 +102,12 @@ def check():
         for r in rows:
             ja = r.get('ja') or ''; ko = r.get('ko') or ''
             if not ja or not ko: continue
-            if ko.count(NL) > ja.count(NL): over += 1
-            if any(width(l) > lim for l in ko.split(NL)): long += 1
+            if is_choice(fn, r):
+                if ko.count(NL) != ja.count(NL): over += 1
+                if any(width(l) > CHOICE_LIM for l in ko.split(NL)): long += 1
+            else:
+                if ko.count(NL) > ja.count(NL): over += 1
+                if any(width(l) > lim for l in ko.split(NL)): long += 1
             if TOKEN.findall(ja) != TOKEN.findall(ko): tok += 1
             elif bool(TOKEN.match(ja)) != bool(TOKEN.match(ko)): tok += 1
         print(f"  {fn:<18} {lim}자  원문보다 줄 많음 {over:>4}   글자 초과 {long:>4}"
@@ -103,7 +123,7 @@ def run(dry=False):
         fixed, stuck = [], []
         for r in rows:
             ko = r.get('ko') or ''
-            if not ko: continue
+            if not ko or is_choice(fn, r): continue
             ls = ko.split(NL)
             if all(width(l) <= lim for l in ls) and len(ls) <= MAXL: continue
             merged = '　'.join(l.strip('　') for l in ls if l)

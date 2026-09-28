@@ -134,47 +134,152 @@ def draw_ribbon_col(rgb, cx, ytop, ybot, text, style, tint, hw_min=0):
 CX1, CX2R, CX2L = 66, 98, 42
 HW1, HW2 = 48, 36
 
+
+# ---------------------------------------------------------------- v3.6 방식
+# v3.5 까지는 원문 열 위에 **리본을 통째로 깔았다.** 그 바람에 인물 그림이
+# 가려지고, 원본의 **투명 주사선과 글자 테두리(= 전투 화면이 비쳐 보이는
+# 연출)** 까지 불투명하게 칠해졌다. 필살기를 쓸 때마다 이 배너가 뜨므로
+# "필살기 연출이 이상하다" 는 제보로 돌아왔다.
+#
+# 지금은 원문 열의 좁은 폭(±24px) 안에서 **획만** 골라 주변 그림으로 메우고,
+# 한글은 리본 없이 글자+테두리만 얹는다. 주사선 행의 투명 픽셀과 배너 바깥
+# 투명 영역은 손대지 않는다. 팔레트 매핑도 불투명 항목에만 한다.
+def box_blur(a, r):
+    k = 2*r+1
+    p = np.pad(a, r, mode='edge').astype(np.float32)
+    c = p.cumsum(0); c = np.vstack([np.zeros((1, c.shape[1])), c]); v = (c[k:] - c[:-k]) / k
+    c = v.cumsum(1); c = np.hstack([np.zeros((c.shape[0], 1)), c]); return (c[:, k:] - c[:, :-k]) / k
+
+
+def dil(m, n):
+    return np.asarray(Image.fromarray(m.astype(np.uint8)*255).filter(ImageFilter.MaxFilter(n))) > 0
+
+
+def inpaint(rgb, hole, src, rounds=300):
+    out = rgb.astype(np.float32).copy()
+    known = src & ~hole
+    out[~known] = 0
+    w = known.astype(np.float32)
+    acc = out * w[..., None]
+    for _ in range(rounds):
+        a2 = sum(np.roll(np.roll(acc, dy, 0), dx, 1) for dy, dx in ((1,0),(-1,0),(0,1),(0,-1)))
+        w2 = sum(np.roll(np.roll(w, dy, 0), dx, 1) for dy, dx in ((1,0),(-1,0),(0,1),(0,-1)))
+        fill = hole & (w2 > 0)
+        acc[fill] = a2[fill] / w2[fill][:, None]
+        w = np.where(fill, 1.0, w)
+        acc = np.where(fill[..., None], acc, acc)
+    return np.clip(acc, 0, 255)
+
+
+def glyph_col(rgb, opaque, scan, cx, y0, y1, hw):
+    """원문 한 열의 획 마스크."""
+    h, w = rgb.shape[:2]
+    lum = rgb.astype(np.float32) @ np.array([.299, .587, .114])
+    det = np.abs(lum - box_blur(lum, 4))
+    m = np.zeros((h, w), bool)
+    xa, xb = max(0, cx-hw), min(w, cx+hw)
+    ya, yb = max(0, y0), min(h, y1)
+    reg = np.zeros((h, w), bool); reg[ya:yb, xa:xb] = True
+    # 획: 세밀한 명암 차 + 주사선이 아닌 투명(글자 테두리)
+    m |= reg & opaque & (det > 18)
+    m |= reg & ~opaque & ~scan
+    m = dil(m, 5)
+    # 덩어리로 닫기: 행마다 밀도가 있는 곳만
+    m = np.asarray(Image.fromarray(m.astype(np.uint8)*255).filter(ImageFilter.MaxFilter(5))
+                   .filter(ImageFilter.MinFilter(3))) > 0
+    return m & reg
+
+
+def draw_col(rgb, alpha_keep, cx, ytop, ybot, text, style, ch_max=34):
+    h, w = rgb.shape[:2]
+    chars = [c for c in text if c != ' ']
+    n = len(chars)
+    ch = int(min(ch_max, max(16, (ybot - ytop) // n)))
+    total = ch*n
+    ys = ytop + ((ybot - ytop) - total)//2
+    Sc = 4
+    f4 = ImageFont.truetype(FONT, ch*Sc)
+    m = Image.new('L', (w*Sc, h*Sc), 0); dr = ImageDraw.Draw(m)
+    for i, c in enumerate(chars):
+        b = dr.textbbox((0, 0), c, font=f4)
+        dr.text((cx*Sc - (b[2]+b[0])//2, (ys + i*ch)*Sc + ch*Sc//2 - (b[3]+b[1])//2), c, font=f4, fill=255)
+    a = np.asarray(m.resize((w, h), Image.LANCZOS)).astype(np.float32)/255
+    ring = np.asarray(Image.fromarray((a*255).astype('uint8')).filter(ImageFilter.MaxFilter(5))).astype(np.float32)/255
+    if style == 'dark':
+        core, edge = np.array([25., 12., 12.]), np.array([250., 246., 240.])
+    else:
+        core, edge = np.array([250., 246., 240.]), np.array([30., 16., 20.])
+    out = rgb.astype(np.float32)
+    out = out*(1-ring[..., None]) + edge*ring[..., None]
+    out = out*(1-a[..., None]) + core*a[..., None]
+    return np.clip(out, 0, 255).astype(np.uint8), (ring > 0.05)
+
+
+def process(nm):
+    ja, cols_ko, style = KO[nm]
+    d, sz = load(nm)
+    (po, w, h, order), palo = PG.gim_image(bytes(d))
+    pitch = (w+15)//16*16; hh = (h+7)//8*8
+    buf = np.frombuffer(bytes(d[po:po+pitch*hh]), np.uint8)
+    img = (PG.unswz(buf, pitch, hh) if order else buf.reshape(hh, pitch)).copy()
+    pal = np.frombuffer(bytes(d[palo:palo+1024]), np.uint8).reshape(256, 4)
+    idx = img[:h, :w].copy()
+    rgba = pal[idx]
+    rgb = rgba[..., :3].astype(np.uint8).copy()
+    opaque = rgba[..., 3] > 0
+    # 주사선 행: 안쪽 폭의 30% 이상이 투명한 행
+    inner = ~opaque[:, 12:w-12]
+    scanrow = inner.mean(1) > 0.30
+    scan = np.zeros_like(opaque); scan[scanrow] = ~opaque[scanrow]
+    # 배너 바깥(둥근 모서리) 투명도 주사선처럼 보존
+    outside = ~opaque & ~dil(opaque & ~scan, 3)
+    scan |= outside
+
+    if len(cols_ko) == 1:
+        cols = [(CX1, 8, h-6, 26, cols_ko[0])]
+    else:
+        cols = [(CX2R, 8, h-6, 24, cols_ko[0]), (CX2L, 8, h-6, 24, cols_ko[1])]
+    hole = np.zeros((h, w), bool)
+    for cx, y0, y1, hw, _ in cols:
+        hole |= glyph_col(rgb, opaque, scan, cx, y0, y1, hw)
+    src = opaque & ~scan
+    rgb2 = inpaint(rgb, hole, src).astype(np.uint8)
+    rgb2[~hole] = rgb[~hole]
+    newtext = np.zeros((h, w), bool)
+    if len(cols_ko) == 1:
+        rgb2, t = draw_col(rgb2, None, CX1, 10, h-8, cols_ko[0], style); newtext |= t
+    else:
+        rgb2, t = draw_col(rgb2, None, CX2R, 10, h//2 + 60, cols_ko[0], style, 30); newtext |= t
+        rgb2, t = draw_col(rgb2, None, CX2L, h//2 - 60, h-8, cols_ko[1], style, 30); newtext |= t
+    changed = (hole | newtext) & ~scan
+    # 팔레트 매핑 (불투명 항목만)
+    P = pal[:, :3].astype(np.int32); okp = pal[:, 3] > 0
+    flat = rgb2[changed].astype(np.int32)
+    dif = ((flat[:, None, :] - P[None, :, :])**2).sum(2); dif[:, ~okp] = 1 << 30
+    idx2 = idx.copy(); idx2[changed] = dif.argmin(1).astype(np.uint8)
+    img[:h, :w] = idx2
+    d[po:po+pitch*hh] = (PG.swz(img) if order else img.reshape(-1)).tobytes()
+    assert len(d) == sz
+    return bytes(d), Image.fromarray(pal[idx], 'RGBA'), Image.fromarray(pal[idx2], 'RGBA'), hole
+
+
+
 def run(make_png=False, only=None):
     os.makedirs(BUILD, exist_ok=True)
     prev = []
-    for nm, (ja, cols_ko, style) in KO.items():
+    for nm in KO:
         if only and nm not in only: continue
-        d, sz = load(nm)
-        (po, w, h, order), palo = PG.gim_image(bytes(d))
-        pitch = (w+15)//16*16; hh = (h+7)//8*8
-        buf = np.frombuffer(bytes(d[po:po+pitch*hh]), np.uint8)
-        img = (PG.unswz(buf, pitch, hh) if order else buf.reshape(hh, pitch)).copy()
-        pal = np.frombuffer(bytes(d[palo:palo+1024]), np.uint8).reshape(256, 4)
-        rgb = pal[img[:h, :w]][:, :, :3].astype(np.uint8).copy()
-        before = rgb.copy()
-        tint = dominant(rgb)
-        sizes = []
-        if len(cols_ko) == 1:
-            sizes.append(draw_ribbon_col(rgb, CX1, 10, h-8, cols_ko[0], style, tint, HW1))
-        else:
-            sizes.append(draw_ribbon_col(rgb, CX2R, 12, None, cols_ko[0], style, tint, HW2))
-            sizes.append(draw_ribbon_col(rgb, CX2L, None, h-10, cols_ko[1], style, tint, HW2))
-        print(f"  {nm}: {ja} -> {' / '.join(cols_ko)}  ({sizes}px)")
-        if make_png:
-            prev.append((nm, Image.fromarray(before), Image.fromarray(rgb))); continue
-        P = pal[:, :3].astype(np.int32)
-        changed = (rgb != before).any(2)
-        flat = rgb[changed].astype(np.int32)
-        if flat.size:
-            dif = ((flat[:, None, :] - P[None, :, :])**2).sum(2)
-            img[:h, :w][changed] = dif.argmin(1).astype(np.uint8)
-        d[po:po+pitch*hh] = (PG.swz(img) if order else img.reshape(-1)).tobytes()
-        assert len(d) == sz
-        q = os.path.join(BUILD, nm + '.GIM'); open(q, 'wb').write(bytes(d))
+        d, a, b, _ = process(nm)
+        print(f"  {nm}: {KO[nm][0]} -> {' / '.join(KO[nm][1])}")
+        if make_png: prev.append((a, b)); continue
+        open(os.path.join(BUILD, nm + '.GIM'), 'wb').write(d)
     if make_png and prev:
-        cols_n = min(6, len(prev))
-        rows_n = (len(prev)+cols_n-1)//cols_n
-        sh = Image.new('RGB', (cols_n*2*136, rows_n*236), (25,25,25))
-        for k,(nm,a,b) in enumerate(prev):
-            x=(k%cols_n)*2*136; y=(k//cols_n)*236
-            sh.paste(a,(x,y)); sh.paste(b,(x+134,y))
-        q = os.path.join(ROOT, 'test_render', '_meikan_ko.png')
-        sh.resize((int(sh.width*1.5), int(sh.height*1.5)), Image.LANCZOS).save(q); print('  ->', q)
+        cols_n = 8; rows_n = (len(prev)*2 + cols_n - 1)//cols_n
+        sh = Image.new('RGBA', (cols_n*136, rows_n*234), (255, 0, 255, 255))
+        for k, im in enumerate([x for p in prev for x in p]):
+            sh.alpha_composite(im, ((k % cols_n)*136, (k//cols_n)*234))
+        os.makedirs(os.path.join(ROOT, 'test_render'), exist_ok=True)
+        q = os.path.join(ROOT, 'test_render', '_meikan_ko.png'); sh.save(q); print('  ->', q)
 
 if __name__ == '__main__':
     sys.stdout = __import__('io').TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
