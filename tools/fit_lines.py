@@ -86,6 +86,20 @@ def is_choice(fn, r):
     try: return 0x4E <= int(r.get('id') or '0', 16) >> 8 <= 0x4F
     except ValueError: return False
 
+def glyphs(s):
+    return len(TOKEN.sub('', s).replace(NL, ''))
+
+def is_auto(fn, r):
+    """사쿠라2 자동 넘김(<FFFA>) 대사.
+
+    음성·연출 시간에 맞춰 글자를 한 자씩 찍는데, 찍을 수 있는 글자 수에 한도가
+    있다. 원문보다 길면 마지막 글자를 못 찍고 <FFFA> 에 닿지 못해 **멈춘다**.
+    (13장 사쿠라 편지: 원문 30자 / 한글 36자 → 35자에서 멈춤.
+     10장 「무사시여……」: 원문 25자 / 한글 26자.)
+    그래서 이 대사는 **글자 수(띄어쓰기 포함, 줄바꿈·제어코드 제외)가 원문 이하**.
+    """
+    return fn.startswith('sakura2') and '<FFFA>' in (r.get('ja') or '')
+
 def check():
     """원문 줄 수·글자 수·제어코드 자리를 어긴 행이 있는지 본다.
 
@@ -108,6 +122,7 @@ def check():
             else:
                 if ko.count(NL) > ja.count(NL): over += 1
                 if any(width(l) > lim for l in ko.split(NL)): long += 1
+            if is_auto(fn, r) and glyphs(ko) > glyphs(ja): long += 1
             if TOKEN.findall(ja) != TOKEN.findall(ko): tok += 1
             elif bool(TOKEN.match(ja)) != bool(TOKEN.match(ko)): tok += 1
         print(f"  {fn:<18} {lim}자  원문보다 줄 많음 {over:>4}   글자 초과 {long:>4}"
